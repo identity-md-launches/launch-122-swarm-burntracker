@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Swarm} from "../src/Swarm.sol";
+import {Swarm, SwarmLaunchToken} from "../src/Swarm.sol";
 import {BurnTracker} from "../src/BurnTracker.sol";
 import {SwarmTestSupport} from "./Swarm.t.sol";
 
@@ -174,6 +174,29 @@ contract BurnTrackerTest is SwarmTestSupport {
         assertBurned(1 ether);
         eq(otherTracker.totalBurned(), 2 ether, "independent burn count");
         eq(address(otherTracker.token()), address(otherToken), "other binding");
+    }
+
+    function test_applicationDeploymentAndBurnsRemainSeparateFromLaunchSupply() public {
+        SwarmLaunchToken launchToken = new SwarmLaunchToken();
+        Swarm application = new Swarm();
+        BurnTracker applicationTracker = new BurnTracker(address(application));
+        uint256 launchSupply = 1_000_000_000 ether;
+        eq(launchToken.totalSupply(), launchSupply, "applications preserve launch supply");
+        eq(launchToken.balanceOf(address(this)), launchSupply, "applications preserve launch allocation");
+        eq(application.balanceOf(address(this)), SUPPLY, "application constructor allocation");
+        eq(address(applicationTracker.token()), address(application), "tracker binds deflationary application");
+        eq(applicationTracker.totalBurned(), 0, "application begins without burns");
+
+        require(launchToken.transfer(ALICE, 100 ether), "launch distribution");
+        eq(launchToken.balanceOf(ALICE), 100 ether, "launch recipient receives full amount");
+        eq(applicationTracker.totalBurned(), 0, "launch transfer cannot affect application burns");
+        require(application.transfer(ALICE, 100 ether), "application transfer");
+        eq(application.balanceOf(ALICE), 99 ether, "application recipient receives net amount");
+        eq(application.totalSupply(), SUPPLY - 1 ether, "application supply decreases");
+        eq(applicationTracker.totalBurned(), 1 ether, "tracker counts only application burn");
+        eq(launchToken.totalSupply(), launchSupply, "application burn preserves launch supply");
+        eq(launchToken.balanceOf(address(this)), launchSupply - 100 ether, "launch allocation after distribution");
+        eq(launchToken.balanceOf(ALICE), 100 ether, "application burn preserves launch recipient balance");
     }
 
     function test_receivingTokensDoesNotConfuseHoldingsWithBurns() public {

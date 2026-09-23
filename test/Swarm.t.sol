@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Swarm} from "../src/Swarm.sol";
+import {Swarm, SwarmLaunchToken} from "../src/Swarm.sol";
 
 // Minimal Foundry interface keeps these tests runnable without downloaded libraries.
 interface SwarmVm {
@@ -60,8 +60,9 @@ contract SwarmConstructorCaller {
 /// Gas report with Forge 1.7.1, solc 0.8.26, default compiler settings: deployment 829,094 gas,
 /// creation code 3,655 bytes; transfer 22,330-60,001 gas; transferFrom 25,262-65,993 gas.
 /// Ranges include zero, self, normal, and reverted calls; these observations are not gas limits.
-/// The protected launch-token floor instead requires fixed supply on transfer; that conflict is
-/// reported separately, not adopted as the behavior of this deflationary application token.
+/// For project launches, select `src/Swarm.sol:SwarmLaunchToken` as the fixed-supply reward token.
+/// Deploy Swarm as an application, then bind BurnTracker to that Swarm address. The separate
+/// launch token mints 1,000,000,000 SWORML and transfers without burning, as the protected floor requires.
 contract SwarmTest is SwarmTestSupport {
     Swarm internal token;
 
@@ -510,5 +511,228 @@ contract SwarmTest is SwarmTestSupport {
         );
         eq(token.balanceOf(address(0)), 0, "burned tokens are not held at zero");
         eq(token.INITIAL_SUPPLY(), SUPPLY, "initial supply constant remains fixed");
+    }
+}
+
+contract SwarmLaunchConstructorCaller {
+    function deploy() external returns (SwarmLaunchToken) {
+        return new SwarmLaunchToken();
+    }
+}
+
+/// @notice Regression tests for the separate fixed-supply launch token, including failed spends.
+/// @dev Gas report with Forge 1.7.1, solc 0.8.26, default compiler settings: deployment 753,402 gas,
+/// creation code 3,393 bytes; transfer 22,330-52,252 gas; transferFrom 25,394-58,448 gas.
+/// Reproduce with `forge test --gas-report`; ranges include successful and reverted calls.
+contract SwarmLaunchTokenTest is SwarmTestSupport {
+    uint256 internal constant LAUNCH_SUPPLY = 1_000_000_000 ether;
+    SwarmLaunchToken internal token;
+
+    function setUp() public {
+        token = new SwarmLaunchToken();
+    }
+
+    function test_constructorSetsLaunchMetadataAndFixedSupply() public view {
+        require(keccak256(bytes(token.name())) == keccak256("Swarm Launch Token"), "launch name");
+        require(keccak256(bytes(token.symbol())) == keccak256("SWORML"), "launch symbol");
+        eq(token.decimals(), 18, "launch decimals");
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+    }
+
+    function test_constructorMintsEntireLaunchSupplyToImmediateDeployer() public {
+        SwarmLaunchConstructorCaller factory = new SwarmLaunchConstructorCaller();
+        vm.recordLogs();
+        SwarmLaunchToken deployed = factory.deploy();
+        SwarmVm.Log[] memory logs = vm.getRecordedLogs();
+        eq(logs.length, 1, "one launch mint event");
+        assertTransferLog(logs[0], address(deployed), address(0), address(factory), LAUNCH_SUPPLY);
+        eq(deployed.balanceOf(address(factory)), LAUNCH_SUPPLY, "factory holds launch supply");
+        eq(deployed.balanceOf(address(this)), 0, "factory caller receives no launch tokens");
+        eq(deployed.totalSupply(), LAUNCH_SUPPLY, "factory deployment supply");
+    }
+
+    function test_transferDeliversFullAmountWithoutBurnEvent() public {
+        vm.recordLogs();
+        require(token.transfer(ALICE, 100 ether), "launch transfer return");
+        SwarmVm.Log[] memory logs = vm.getRecordedLogs();
+        eq(logs.length, 1, "no launch burn event");
+        assertTransferLog(logs[0], address(token), address(this), ALICE, 100 ether);
+        assertLaunchState(LAUNCH_SUPPLY - 100 ether, 100 ether, 0);
+    }
+
+    function test_entireLaunchSupplyCanMoveRepeatedlyWithoutDeflation() public {
+        require(token.transfer(ALICE, LAUNCH_SUPPLY), "full launch transfer");
+        assertLaunchState(0, LAUNCH_SUPPLY, 0);
+        vm.prank(ALICE);
+        require(token.transfer(BOB, LAUNCH_SUPPLY), "holder full launch transfer");
+        assertLaunchState(0, 0, LAUNCH_SUPPLY);
+    }
+
+    function test_zeroTransfersAndFullBalanceSelfTransferPreserveSupplyAndEmit() public {
+        vm.recordLogs();
+        vm.prank(ALICE);
+        require(token.transfer(BOB, 0), "empty launch transfer");
+        vm.prank(SPENDER);
+        require(token.transferFrom(ALICE, ALICE, 0), "unapproved zero self transfer");
+        require(token.transfer(address(this), LAUNCH_SUPPLY), "full launch self transfer");
+        SwarmVm.Log[] memory logs = vm.getRecordedLogs();
+        eq(logs.length, 3, "one event per launch transfer");
+        assertTransferLog(logs[0], address(token), ALICE, BOB, 0);
+        assertTransferLog(logs[1], address(token), ALICE, ALICE, 0);
+        assertTransferLog(logs[2], address(token), address(this), address(this), LAUNCH_SUPPLY);
+        eq(token.allowance(ALICE, SPENDER), 0, "zero spend leaves zero approval");
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+    }
+
+    function test_exactAllowanceCannotBeReplayed() public {
+        require(token.approve(SPENDER, 100 ether), "launch approval");
+        vm.prank(SPENDER);
+        require(token.transferFrom(address(this), ALICE, 100 ether), "launch delegated transfer");
+        eq(token.allowance(address(this), SPENDER), 0, "launch approval exhausted");
+        assertLaunchState(LAUNCH_SUPPLY - 100 ether, 100 ether, 0);
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InsufficientAllowance.selector, SPENDER, 0, 1));
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), ALICE, 1);
+        eq(token.allowance(address(this), SPENDER), 0, "replay preserves exhausted approval");
+        assertLaunchState(LAUNCH_SUPPLY - 100 ether, 100 ether, 0);
+    }
+
+    function test_unlimitedApprovalSurvivesRepeatedSpendsAndCanBeRevoked() public {
+        require(token.approve(SPENDER, type(uint256).max), "unlimited launch approval");
+        vm.prank(SPENDER);
+        require(token.transferFrom(address(this), ALICE, 100 ether), "first launch spend");
+        vm.prank(SPENDER);
+        require(token.transferFrom(address(this), address(this), LAUNCH_SUPPLY - 100 ether), "launch self spend");
+        eq(token.allowance(address(this), SPENDER), type(uint256).max, "unlimited launch approval preserved");
+        require(token.approve(SPENDER, 0), "revoke launch approval");
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InsufficientAllowance.selector, SPENDER, 0, 1));
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), BOB, 1);
+        eq(token.allowance(address(this), SPENDER), 0, "launch revocation persists");
+        assertLaunchState(LAUNCH_SUPPLY - 100 ether, 100 ether, 0);
+    }
+
+    function test_approvalCannotBeUsedByAnotherSpenderOrAboveItsLimit() public {
+        require(token.approve(SPENDER, 99 ether), "limited launch approval");
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InsufficientAllowance.selector, BOB, 0, 1));
+        vm.prank(BOB);
+        token.transferFrom(address(this), ALICE, 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(SwarmLaunchToken.ERC20InsufficientAllowance.selector, SPENDER, 99 ether, 100 ether)
+        );
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), ALICE, 100 ether);
+        eq(token.allowance(address(this), SPENDER), 99 ether, "failed launch spends preserve approval");
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+    }
+
+    function test_failedTransfersRestoreAllowanceAndPreserveSupply() public {
+        require(token.approve(SPENDER, LAUNCH_SUPPLY + 1), "launch approval above balance");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SwarmLaunchToken.ERC20InsufficientBalance.selector, address(this), LAUNCH_SUPPLY, LAUNCH_SUPPLY + 1
+            )
+        );
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), ALICE, LAUNCH_SUPPLY + 1);
+        eq(token.allowance(address(this), SPENDER), LAUNCH_SUPPLY + 1, "balance failure restores launch approval");
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InvalidReceiver.selector, address(0)));
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), address(0), 100 ether);
+        eq(token.allowance(address(this), SPENDER), LAUNCH_SUPPLY + 1, "receiver failure restores launch approval");
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+    }
+
+    function test_invalidZeroAddressesRevertEvenForZeroAmounts() public {
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InvalidReceiver.selector, address(0)));
+        token.transfer(address(0), 0);
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InvalidReceiver.selector, address(0)));
+        token.transferFrom(address(this), address(0), 0);
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InvalidSender.selector, address(0)));
+        token.transferFrom(address(0), ALICE, 0);
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InvalidSpender.selector, address(0)));
+        token.approve(address(0), 0);
+        eq(token.allowance(address(this), address(0)), 0, "invalid spender approval remains zero");
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+    }
+
+    function test_maximumAmountAndUnfundedSelfTransferRevertWithBalanceErrors() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SwarmLaunchToken.ERC20InsufficientBalance.selector, address(this), LAUNCH_SUPPLY, type(uint256).max
+            )
+        );
+        token.transfer(ALICE, type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(SwarmLaunchToken.ERC20InsufficientBalance.selector, ALICE, 0, 1));
+        vm.prank(ALICE);
+        token.transfer(ALICE, 1);
+        assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+    }
+
+    function test_noMintInitializationOrAdminPrivilegesForDeployerOrStranger() public {
+        bytes[10] memory calls = [
+            abi.encodeWithSignature("mint(address,uint256)", ALICE, 1 ether),
+            abi.encodeWithSignature("mint(uint256)", 1 ether),
+            abi.encodeWithSignature("mint()"),
+            abi.encodeWithSignature("issue(uint256)", 1 ether),
+            abi.encodeWithSignature("setOwner(address)", ALICE),
+            abi.encodeWithSignature("transferOwnership(address)", ALICE),
+            abi.encodeWithSignature("upgradeTo(address)", ALICE),
+            abi.encodeWithSignature("initialize(address)", ALICE),
+            abi.encodeWithSignature("unpause()"),
+            abi.encodeWithSignature("setMinter(address)", ALICE)
+        ];
+        for (uint256 i; i < calls.length; ++i) {
+            (bool deployerOk,) = address(token).call(calls[i]);
+            require(!deployerOk, "launch deployer admin call accepted");
+            vm.prank(ALICE);
+            (bool strangerOk,) = address(token).call(calls[i]);
+            require(!strangerOk, "launch stranger admin call accepted");
+            assertLaunchState(LAUNCH_SUPPLY, 0, 0);
+        }
+    }
+
+    function test_runtimeIsBoundedAndHasNoEscapeOpcodes() public view {
+        bytes memory code = address(token).code;
+        require(code.length > 0 && code.length <= 24_576, "launch runtime size");
+        for (uint256 i; i < code.length; ++i) {
+            uint8 op = uint8(code[i]);
+            if (op >= 0x60 && op <= 0x7f) {
+                i += op - 0x5f;
+                continue;
+            }
+            require(op != 0xf4 && op != 0xf2 && op != 0xff, "forbidden launch opcode");
+        }
+    }
+
+    function testFuzz_transfersPreserveFixedSupply(uint256 seed, bool self, bool delegated) public {
+        uint256 amount = seed % (LAUNCH_SUPPLY + 1);
+        address recipient = self ? address(this) : ALICE;
+        if (delegated) require(token.approve(SPENDER, amount + 1), "fuzz launch approval");
+        vm.recordLogs();
+        if (delegated) {
+            vm.prank(SPENDER);
+            require(token.transferFrom(address(this), recipient, amount), "fuzz delegated launch transfer");
+            eq(token.allowance(address(this), SPENDER), 1, "fuzz launch allowance debit");
+        } else {
+            require(token.transfer(recipient, amount), "fuzz direct launch transfer");
+        }
+        SwarmVm.Log[] memory logs = vm.getRecordedLogs();
+        eq(logs.length, 1, "fuzz launch emits no burn");
+        assertTransferLog(logs[0], address(token), address(this), recipient, amount);
+        assertLaunchState(self ? LAUNCH_SUPPLY : LAUNCH_SUPPLY - amount, self ? 0 : amount, 0);
+    }
+
+    function assertLaunchState(uint256 deployerBalance, uint256 aliceBalance, uint256 bobBalance) internal view {
+        eq(token.INITIAL_SUPPLY(), LAUNCH_SUPPLY, "launch initial supply constant");
+        eq(token.totalSupply(), LAUNCH_SUPPLY, "launch supply remains fixed");
+        eq(token.balanceOf(address(this)), deployerBalance, "launch deployer balance");
+        eq(token.balanceOf(ALICE), aliceBalance, "launch alice balance");
+        eq(token.balanceOf(BOB), bobBalance, "launch bob balance");
+        eq(token.balanceOf(SPENDER), 0, "launch spender receives no fee");
+        eq(token.balanceOf(address(0)), 0, "launch zero address holds no tokens");
+        eq(deployerBalance + aliceBalance + bobBalance, LAUNCH_SUPPLY, "launch balances conserve supply");
     }
 }

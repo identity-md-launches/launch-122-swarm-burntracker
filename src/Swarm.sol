@@ -79,3 +79,70 @@ contract Swarm {
         if (burned != 0) emit Transfer(from, address(0), burned);
     }
 }
+
+/// @title Swarm Launch Token
+/// @notice The separate fixed-supply reward token for the project's launch pool.
+/// @dev Select src/Swarm.sol:SwarmLaunchToken as the launch token. Deploy Swarm as an
+/// application contract and pass its address to BurnTracker. Swarm burns on transfers
+/// and cannot satisfy the launch pool's requirement to receive the full amount.
+/// This token mints 1,000,000,000 tokens to its deployer, has no constructor arguments,
+/// fees, mint entry point, initializer, owner privileges, or external dependencies.
+contract SwarmLaunchToken {
+    string public constant name = "Swarm Launch Token";
+    string public constant symbol = "SWORML";
+    uint8 public constant decimals = 18;
+    uint256 public constant INITIAL_SUPPLY = 1_000_000_000 * 10 ** 18;
+    uint256 public constant totalSupply = INITIAL_SUPPLY;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    error ERC20InvalidSender(address sender);
+    error ERC20InvalidReceiver(address receiver);
+    error ERC20InvalidSpender(address spender);
+    error ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed);
+    error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed);
+
+    constructor() {
+        balanceOf[msg.sender] = INITIAL_SUPPLY;
+        emit Transfer(address(0), msg.sender, INITIAL_SUPPLY);
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        if (spender == address(0)) revert ERC20InvalidSpender(spender);
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        uint256 approved = allowance[from][msg.sender];
+        if (approved != type(uint256).max) {
+            if (approved < amount) revert ERC20InsufficientAllowance(msg.sender, approved, amount);
+            allowance[from][msg.sender] = approved - amount;
+        }
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    function _transfer(address from, address to, uint256 amount) private {
+        if (from == address(0)) revert ERC20InvalidSender(from);
+        if (to == address(0)) revert ERC20InvalidReceiver(to);
+        uint256 balance = balanceOf[from];
+        if (balance < amount) revert ERC20InsufficientBalance(from, balance, amount);
+
+        // Debit before crediting so self-transfers preserve the account's balance.
+        balanceOf[from] = balance - amount;
+        balanceOf[to] += amount;
+        // Every transfer preserves both the sum of balances and the fixed total supply.
+        emit Transfer(from, to, amount);
+    }
+}

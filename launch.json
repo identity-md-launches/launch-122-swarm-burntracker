@@ -1,0 +1,26 @@
+{
+  "kind": "evm_project",
+  "token": {
+    "contract": "SwarmLaunchToken",
+    "name": "Swarm Launch Token",
+    "symbol": "SWORML",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "contracts": [
+    {
+      "contract": "Swarm",
+      "constructorArgs": []
+    },
+    {
+      "contract": "BurnTracker",
+      "constructorArgs": ["$contract:Swarm"]
+    }
+  ],
+  "notes": "Launch token: src/Swarm.sol:SwarmLaunchToken, a separate fixed-supply ERC-20 (name Swarm Launch Token, symbol SWORML, 18 decimals) with no constructor arguments that mints exactly 1,000,000,000 tokens (10^27 minor units) to msg.sender, i.e. ProjectFactory, in its constructor. totalSupply is a constant; there is no mint entry point, initializer, owner, fee, proxy, or external dependency, so the launch pool and MerkleDistributor receive the full transferred amount. The deflationary Swarm token cannot be the launch token because its 1 percent burn on transfer would break the factory supply split and the pool accounting.\n\nApplication contracts, in constructor dependency order:\n1. Swarm (src/Swarm.sol:Swarm): the deflationary ERC-20 named Swarm, symbol SWORM, 18 decimals. No constructor arguments. Mints 1,000,000 tokens (10^24 minor units) to msg.sender at construction; because constructors run with the factory as msg.sender, this initial supply is held by the immutable ProjectFactory. Every transfer and transferFrom burns floor(amount / 100) from totalSupply and credits the remaining amount to the recipient. Zero-amount transfers emit a Transfer event and change nothing; self-transfers lose only the burn. No owner, mint function, fee exemption, or initialization calls.\n2. BurnTracker (src/BurnTracker.sol:BurnTracker): constructor(address tokenAddress) receives $contract:Swarm, the address of the Swarm contract deployed in step 1. It stores the token as an immutable reference, reverts if the address has no code, and exposes totalBurned() = Swarm.INITIAL_SUPPLY() - Swarm.totalSupply(), the cumulative amount burned in base units. It has no privileged roles, storage counters, or update calls.\n\nNo $owner references are used: none of the contracts take an owner or privileged address, and ownership beyond the initial mints does not exist. No application contract accepts ETH.\n\nPool: paired against native ETH (zero address), fee 3000, tickSpacing 60, initialPrice 79228162514264337593543950336 (sqrtPriceX96 for a 1:1 ratio); no hook. The deployer derives the effective opening price from the pinned policy when it specifies initialMarketCapWei.\n\nTests live in test/Swarm.t.sol and test/BurnTracker.t.sol and are dependency-free (no forge-std); run with forge test --gas-report."
+}

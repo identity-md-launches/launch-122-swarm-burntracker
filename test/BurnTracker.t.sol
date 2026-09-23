@@ -134,6 +134,29 @@ contract BurnTrackerTest is SwarmTestSupport {
         eq(token.balanceOf(BOB), 0, "failed delegated recipient unchanged");
     }
 
+    function test_insufficientAllowanceLeavesBurnsUnchangedAndValidRetryCountsOnce() public {
+        require(token.transfer(ALICE, 200 ether), "establish burn and fund holder");
+        vm.prank(ALICE);
+        require(token.approve(SPENDER, 99 ether), "approve only the net amount");
+        vm.expectRevert(abi.encodeWithSelector(Swarm.ERC20InsufficientAllowance.selector, SPENDER, 99 ether, 100 ether));
+        vm.prank(SPENDER);
+        token.transferFrom(ALICE, BOB, 100 ether);
+        assertBurned(2 ether);
+        eq(token.allowance(ALICE, SPENDER), 99 ether, "rejected spend preserves allowance");
+        eq(token.balanceOf(ALICE), 198 ether, "rejected spend preserves sender balance");
+        eq(token.balanceOf(BOB), 0, "rejected spend cannot credit recipient");
+
+        vm.prank(ALICE);
+        require(token.approve(SPENDER, 100 ether), "approve gross amount for retry");
+        vm.prank(SPENDER);
+        require(token.transferFrom(ALICE, BOB, 100 ether), "retry succeeds");
+        assertBurned(3 ether);
+        eq(token.allowance(ALICE, SPENDER), 0, "retry consumes allowance once");
+        eq(token.balanceOf(ALICE), 98 ether, "retry debits gross amount once");
+        eq(token.balanceOf(BOB), 99 ether, "retry credits net amount once");
+        eq(token.balanceOf(address(this)), SUPPLY - 200 ether, "unrelated holder unchanged");
+    }
+
     function test_transferToZeroCannotBeCountedAsBurn() public {
         require(token.transfer(ALICE, 100 ether), "establish burn");
         vm.expectRevert(abi.encodeWithSelector(Swarm.ERC20InvalidReceiver.selector, address(0)));

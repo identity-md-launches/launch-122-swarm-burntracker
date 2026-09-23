@@ -54,8 +54,11 @@ contract SwarmConstructorCaller {
 
 /// @notice Run `forge test --match-path test/Swarm.t.sol`; use `forge test --gas-report` for gas costs.
 /// @dev Expectations use base units: indivisible fractions round down separately on each transfer.
+/// Test README: deploy `new Swarm()` first, then `new BurnTracker(address(token))`.
+/// No initialization, privileged account, or external test library is required. Run `forge build`
+/// and `forge test` from the repository root to compile and check both contract suites.
 /// Gas report with Forge 1.7.1, solc 0.8.26, default compiler settings: deployment 829,094 gas,
-/// creation code 3,655 bytes; transfer 22,330-60,001 gas; transferFrom 25,406-65,993 gas.
+/// creation code 3,655 bytes; transfer 22,330-60,001 gas; transferFrom 25,262-65,993 gas.
 /// Ranges include zero, self, normal, and reverted calls; these observations are not gas limits.
 /// The protected launch-token floor instead requires fixed supply on transfer; that conflict is
 /// reported separately, not adopted as the behavior of this deflationary application token.
@@ -382,6 +385,26 @@ contract SwarmTest is SwarmTestSupport {
         vm.prank(SPENDER);
         token.transferFrom(address(this), address(0), 100 ether);
         eq(token.allowance(address(this), SPENDER), 100 ether, "invalid recipient restores allowance");
+        assertInitialState();
+    }
+
+    function test_transferFromSelfRequiresFullBalanceAndRollsBackAllowance() public {
+        require(token.approve(SPENDER, SUPPLY + 1), "self approval beyond balance");
+        vm.expectRevert(
+            abi.encodeWithSelector(Swarm.ERC20InsufficientBalance.selector, address(this), SUPPLY, SUPPLY + 1)
+        );
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), address(this), SUPPLY + 1);
+        eq(token.allowance(address(this), SPENDER), SUPPLY + 1, "failed self transfer restores allowance");
+        assertInitialState();
+    }
+
+    function test_transferFromZeroAmountToZeroRecipientStillReverts() public {
+        require(token.approve(SPENDER, 100 ether), "approval");
+        vm.expectRevert(abi.encodeWithSelector(Swarm.ERC20InvalidReceiver.selector, address(0)));
+        vm.prank(SPENDER);
+        token.transferFrom(address(this), address(0), 0);
+        eq(token.allowance(address(this), SPENDER), 100 ether, "invalid zero transfer preserves allowance");
         assertInitialState();
     }
 
